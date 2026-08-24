@@ -1,0 +1,4 @@
+Go to Media - Open Network Stream - Please Enter a new URL
+rtsp://Username:Password@IPaddress/Stream1 | HD quality
+rtsp://Username:Password@IPaddress/Stream2 | Standar quality
+rtsp://Lucarez2:Lucarezking@192.168.11.180/stream1

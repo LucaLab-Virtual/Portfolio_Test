@@ -1,0 +1,45 @@
+    Uninstall Azure AD Connect:
+
+    To stop synchronization and remove the connection between AD and AAD, 
+    you should first uninstall Azure AD Connect. Follow these steps:
+
+    a. Open the "Azure AD Connect" application on the server where it is installed.
+
+    b. In the Azure AD Connect Configuration wizard, select "Customize synchronization options."
+
+    c. On the "Ready to Configure" page, select "Configure" to access the configuration options.
+
+    d. Choose "Uninstall" to remove Azure AD Connect. This action will stop synchronization.
+
+    Turn Off Directory Synchronization in Azure Portal:
+
+    After uninstalling Azure AD Connect, 
+    you should disable directory synchronization in the Azure Portal:
+
+    a. Log in to the Azure portal (portal.azure.com).
+
+    b. Navigate to "Azure Active Directory."
+
+    c. Select "Azure AD Connect" in the left menu.
+
+    d. Under "Azure AD Connect," select "Disconnect Directory."
+
+    e. Follow the prompts to confirm and disconnect the directory.
+
+    Clean Up Azure AD Connect Objects:
+
+    Disconnecting the directory doesn't automatically remove all objects created by Azure AD Connect. 
+    You may need to clean up these objects manually, 
+    especially if you want to remove AAD user accounts and groups that were synchronized from AD.
+
+    a. In the Azure portal, go to "Azure Active Directory" > "Users" to view and manage users.
+
+    b. Similarly, check "Groups" to manage synchronized groups.
+
+    c. You may also need to address other objects like contacts, service accounts, etc.
+
+    Remove Unwanted AD Connect Objects in On-Premises AD:
+
+    If there are objects in your on-premises AD that you don't want to exist in AAD, 
+    you should consider removing them from your on-premises AD. Keep in mind that this will not delete the corresponding objects in AAD; 
+    you'll need to do this manually in the Azure portal.

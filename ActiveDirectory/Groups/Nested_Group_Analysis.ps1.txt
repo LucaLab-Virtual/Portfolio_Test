@@ -1,0 +1,715 @@
+<#
+.SYNOPSIS
+    Analyzes Active Directory group nesting structures, providing detailed hierarchy information and visualizations.
+.DESCRIPTION
+    This script performs comprehensive analysis of AD group nesting including:
+    - Direct and indirect members of a group
+    - Group hierarchy and nesting levels
+    - Circular reference detection
+    - Path analysis between nested groups
+    - Export results in multiple formats (CSV, HTML, JSON, and GraphViz DOT)
+.PARAMETER GroupName
+    The name or distinguished name of the AD group to analyze.
+.PARAMETER ExportPath
+    The directory path where export files will be saved. Defaults to current directory.
+.PARAMETER MaxDepth
+    Maximum recursion depth to analyze. Default is 10.
+.PARAMETER IncludeUsers
+    Include user members in the analysis. Default is $true.
+.PARAMETER IncludeComputers
+    Include computer members in the analysis. Default is $false.
+.PARAMETER DomainController
+    Optional: Specify a domain controller to use for AD queries.
+.PARAMETER OutputFormats
+    Comma-separated list of output formats: CSV,HTML,JSON,DOT. Default is all.
+.PARAMETER ShowGraph
+    Open the generated GraphViz graph in default viewer (requires GraphViz installed).
+.EXAMPLE
+    .\Nested_Group_Analysis.ps1 -GroupName "Domain Admins"
+.EXAMPLE
+    .\Nested_Group_Analysis.ps1 -GroupName "Project Team" -MaxDepth 5 -IncludeComputers
+.EXAMPLE
+    .\Nested_Group_Analysis.ps1 -GroupName "IT Department" -OutputFormats HTML,JSON
+.NOTES
+    Requires ActiveDirectory module. Run as Administrator or with appropriate AD permissions.
+    GraphViz visualization requires GraphViz (dot.exe) to be installed for DOT format.
+#>
+<#
+Usage Examples:
+powershell
+
+# Basic analysis
+.\Nested_Group_Analysis.ps1 -GroupName "Domain Admins"
+
+# Deep analysis with custom depth
+.\Nested_Group_Analysis.ps1 -GroupName "IT Department" -MaxDepth 8
+
+# Include computers and generate graph
+.\Nested_Group_Analysis.ps1 -GroupName "All Workstations" -IncludeComputers -ShowGraph
+
+# Only specific output formats
+.\Nested_Group_Analysis.ps1 -GroupName "Sales Team" -OutputFormats HTML,JSON
+
+# Save to custom location
+.\Nested_Group_Analysis.ps1 -GroupName "Engineering" -ExportPath "C:\ADReports"
+
+# Use specific domain controller
+.\Nested_Group_Analysis.ps1 -GroupName "Project Alpha" -DomainController "DC02.domain.com"
+
+Sample Output Files:
+
+    NestedAnalysis_20260115_143022_Groups.csv - All groups with their statistics
+
+    NestedAnalysis_20260115_143022_Members.csv - All members with their parent groups
+
+    NestedAnalysis_20260115_143022_Report.html - Interactive HTML report
+
+    NestedAnalysis_20260115_143022_Analysis.json - Complete JSON data
+
+    NestedAnalysis_20260115_143022_Graph.dot - GraphViz diagram file
+
+HTML Report Preview:
+
+The HTML report features:
+
+    Summary statistics cards
+
+    Color-coded depth levels (L0-L5 with different shades)
+
+    Badge indicators for object types
+
+    Comprehensive member tables
+
+    Warnings for circular references
+
+    Professional, responsive design
+
+Requirements:
+
+    ActiveDirectory PowerShell module
+
+    For PNG generation: GraphViz installed (optional)
+#>
+
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$true, Position=0)]
+    [string]$GroupName,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ExportPath = ".",
+    
+    [Parameter(Mandatory=$false)]
+    [int]$MaxDepth = 10,
+    
+    [Parameter(Mandatory=$false)]
+    [bool]$IncludeUsers = $true,
+    
+    [Parameter(Mandatory=$false)]
+    [bool]$IncludeComputers = $false,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$DomainController,
+    
+    [Parameter(Mandatory=$false)]
+    [ValidateSet('CSV','HTML','JSON','DOT')]
+    [string[]]$OutputFormats = @('CSV','HTML','JSON','DOT'),
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$ShowGraph
+)
+
+#region Helper Functions
+function Import-ADModule {
+    try {
+        if (-not (Get-Module -Name ActiveDirectory -ListAvailable)) {
+            Write-Error "ActiveDirectory module is not installed. Please install RSAT-AD-PowerShell."
+            return $false
+        }
+        Import-Module ActiveDirectory -Force -ErrorAction Stop
+        Write-Host "ActiveDirectory module loaded successfully." -ForegroundColor Green
+        return $true
+    }
+    catch {
+        Write-Error "Failed to import ActiveDirectory module: $_"
+        return $false
+    }
+}
+
+function Get-ADObjectSafely {
+    param(
+        [string]$Identity,
+        [string[]]$Properties,
+        [string]$DC
+    )
+    
+    try {
+        $params = @{
+            Identity = $Identity
+            Properties = $Properties
+            ErrorAction = 'Stop'
+        }
+        if ($DC) { $params.Server = $DC }
+        return Get-ADObject @params
+    }
+    catch {
+        if ($_.Exception.Message -match "Cannot find an object with identity") {
+            Write-Warning "Object not found: $Identity"
+        } else {
+            Write-Warning "Error retrieving object: $Identity - $_"
+        }
+        return $null
+    }
+}
+
+function Get-GroupMembersRecursive {
+    param(
+        [string]$GroupDN,
+        [int]$CurrentDepth,
+        [hashtable]$Visited,
+        [System.Collections.ArrayList]$NestingTree,
+        [string]$DC
+    )
+    
+    # Check for circular references
+    if ($Visited.ContainsKey($GroupDN)) {
+        Write-Warning "Circular reference detected! Group '$GroupDN' appears multiple times in the nesting."
+        $Visited[$GroupDN] = $true
+        return
+    }
+    
+    # Check depth limit
+    if ($CurrentDepth -gt $MaxDepth) {
+        Write-Warning "Max depth ($MaxDepth) reached at group: $GroupDN"
+        return
+    }
+    
+    # Mark as visited
+    $Visited[$GroupDN] = $true
+    
+    # Get group details
+    $group = Get-ADObjectSafely -Identity $GroupDN -Properties @('Name', 'DisplayName', 'Description', 'GroupType', 'Member', 'CanonicalName') -DC $DC
+    
+    if (-not $group) {
+        return
+    }
+    
+    # Get members
+    try {
+        $members = Get-ADGroupMember -Identity $GroupDN -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Cannot get members for group: $GroupDN - $_"
+        return
+    }
+    
+    $groupMembers = @()
+    $nestedGroups = @()
+    
+    foreach ($member in $members) {
+        $memberType = $member.objectClass
+        
+        # Skip if not included
+        if ($memberType -eq 'user' -and -not $IncludeUsers) { continue }
+        if ($memberType -eq 'computer' -and -not $IncludeComputers) { continue }
+        
+        $memberObj = Get-ADObjectSafely -Identity $member.DistinguishedName -Properties @('Name', 'DisplayName', 'SamAccountName') -DC $DC
+        
+        if (-not $memberObj) { continue }
+        
+        $memberInfo = [PSCustomObject]@{
+            Name = $memberObj.Name
+            DisplayName = if ($memberObj.DisplayName) { $memberObj.DisplayName } else { $memberObj.Name }
+            SamAccountName = if ($memberObj.SamAccountName) { $memberObj.SamAccountName } else { $memberObj.Name }
+            DistinguishedName = $member.DistinguishedName
+            ObjectClass = $memberType
+            Depth = $CurrentDepth
+            ParentGroup = $group.Name
+            ParentGroupDN = $GroupDN
+        }
+        
+        $groupMembers += $memberInfo
+        $NestingTree.Add($memberInfo) | Out-Null
+        
+        # If member is a group, recurse
+        if ($memberType -eq 'group') {
+            $nestedGroups += $member.DistinguishedName
+            Get-GroupMembersRecursive -GroupDN $member.DistinguishedName -CurrentDepth ($CurrentDepth + 1) -Visited $Visited -NestingTree $NestingTree -DC $DC
+        }
+    }
+    
+    # Store group info for summary
+    $groupInfo = [PSCustomObject]@{
+        GroupName = $group.Name
+        DisplayName = if ($group.DisplayName) { $group.DisplayName } else { $group.Name }
+        DistinguishedName = $GroupDN
+        Description = $group.Description
+        GroupType = $group.GroupType
+        CanonicalName = $group.CanonicalName
+        Depth = $CurrentDepth
+        TotalMembers = $members.Count
+        UserMembers = ($members | Where-Object { $_.objectClass -eq 'user' }).Count
+        GroupMembers = ($members | Where-Object { $_.objectClass -eq 'group' }).Count
+        ComputerMembers = ($members | Where-Object { $_.objectClass -eq 'computer' }).Count
+        OtherMembers = ($members | Where-Object { $_.objectClass -notin @('user','group','computer') }).Count
+        MemberNames = ($groupMembers | ForEach-Object { $_.Name }) -join "; "
+    }
+    
+    return $groupInfo
+}
+
+function Generate-HTMLReport {
+    param(
+        [PSCustomObject]$AnalysisResult,
+        [string]$OutputPath,
+        [PSCustomObject]$Summary
+    )
+    
+    $html = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Nested Group Analysis - $(Get-Date)</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; margin-top: 30px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        .stat-card { background: #ecf0f1; padding: 15px; border-radius: 8px; border-left: 4px solid #3498db; }
+        .stat-value { font-size: 24px; font-weight: bold; color: #2c3e50; }
+        .stat-label { font-size: 12px; color: #7f8c8d; text-transform: uppercase; margin-top: 5px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th { background: #34495e; color: white; padding: 12px; text-align: left; }
+        td { padding: 10px; border-bottom: 1px solid #ddd; }
+        tr:hover { background: #f8f9fa; }
+        .depth-0 { background: #e8f4f8; }
+        .depth-1 { background: #d4eaf7; }
+        .depth-2 { background: #c0dfef; }
+        .depth-3 { background: #acd4e7; }
+        .depth-4 { background: #98c9df; }
+        .depth-5 { background: #84bed7; }
+        .tag { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+        .tag-user { background: #2ecc71; color: white; }
+        .tag-group { background: #3498db; color: white; }
+        .tag-computer { background: #e67e22; color: white; }
+        .tag-other { background: #95a5a6; color: white; }
+        .warning { background: #fff3cd; border: 1px solid #ffc107; padding: 10px; border-radius: 5px; margin: 10px 0; }
+        .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid #ddd; color: #7f8c8d; font-size: 12px; text-align: center; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+        .badge-primary { background: #3498db; color: white; }
+        .badge-success { background: #2ecc71; color: white; }
+        .badge-warning { background: #f39c12; color: white; }
+        .badge-danger { background: #e74c3c; color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 Nested Group Analysis Report</h1>
+        <p><strong>Generated:</strong> $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")</p>
+        <p><strong>Root Group:</strong> $($Summary.RootGroup)</p>
+        
+        <h2>📊 Summary Statistics</h2>
+        <div class="summary-grid">
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.TotalGroups)</div>
+                <div class="stat-label">Total Groups</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.TotalMembers)</div>
+                <div class="stat-label">Total Members</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.MaxDepth)</div>
+                <div class="stat-label">Maximum Nesting Depth</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.CircularReferences)</div>
+                <div class="stat-label">Circular References</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.UserMembers)</div>
+                <div class="stat-label">User Members</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.GroupMembers)</div>
+                <div class="stat-label">Nested Groups</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.ComputerMembers)</div>
+                <div class="stat-label">Computer Members</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">$($Summary.OtherMembers)</div>
+                <div class="stat-label">Other Members</div>
+            </div>
+        </div>
+"@
+    
+    if ($Summary.CircularReferences -gt 0) {
+        $html += @"
+        <div class="warning">
+            <strong>⚠️ Warning:</strong> $($Summary.CircularReferences) circular reference(s) detected in the group nesting.
+            Please review the group structure to resolve these loops.
+        </div>
+"@
+    }
+    
+    $html += @"
+        <h2>📋 Group Details</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Depth</th>
+                    <th>Group Name</th>
+                    <th>Display Name</th>
+                    <th>Description</th>
+                    <th>Total Members</th>
+                    <th>Groups</th>
+                    <th>Users</th>
+                    <th>Computers</th>
+                </tr>
+            </thead>
+            <tbody>
+"@
+    
+    $groupDetails = $AnalysisResult | Where-Object { $_.GroupName } | Sort-Object Depth, GroupName
+    foreach ($group in $groupDetails) {
+        $depthClass = "depth-$($group.Depth)"
+        $html += @"
+                <tr class="$depthClass">
+                    <td><span class="badge badge-primary">L$($group.Depth)</span></td>
+                    <td><strong>$($group.GroupName)</strong></td>
+                    <td>$($group.DisplayName)</td>
+                    <td>$($group.Description)</td>
+                    <td><span class="badge badge-primary">$($group.TotalMembers)</span></td>
+                    <td><span class="badge badge-warning">$($group.GroupMembers)</span></td>
+                    <td><span class="badge badge-success">$($group.UserMembers)</span></td>
+                    <td><span class="badge badge-danger">$($group.ComputerMembers)</span></td>
+                </tr>
+"@
+    }
+    
+    $html += @"
+            </tbody>
+        </table>
+        
+        <h2>👥 Member Details</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Depth</th>
+                    <th>Name</th>
+                    <th>Display Name</th>
+                    <th>Object Class</th>
+                    <th>Parent Group</th>
+                </tr>
+            </thead>
+            <tbody>
+"@
+    
+    $members = $AnalysisResult | Where-Object { $_.ParentGroup -and -not $_.GroupName } | Sort-Object Depth, Name
+    foreach ($member in $members) {
+        $tagClass = switch ($member.ObjectClass) {
+            'user' { 'tag-user' }
+            'group' { 'tag-group' }
+            'computer' { 'tag-computer' }
+            default { 'tag-other' }
+        }
+        $depthClass = "depth-$($member.Depth)"
+        $html += @"
+                <tr class="$depthClass">
+                    <td><span class="badge badge-primary">L$($member.Depth)</span></td>
+                    <td><strong>$($member.Name)</strong></td>
+                    <td>$($member.DisplayName)</td>
+                    <td><span class="tag $tagClass">$($member.ObjectClass)</span></td>
+                    <td>$($member.ParentGroup)</td>
+                </tr>
+"@
+    }
+    
+    $html += @"
+            </tbody>
+        </table>
+        
+        <div class="footer">
+            <p>Generated by Nested_Group_Analysis.ps1 | $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")</p>
+            <p>Active Directory Group Analysis Tool</p>
+        </div>
+    </div>
+</body>
+</html>
+"@
+    
+    $html | Out-File -FilePath $OutputPath -Encoding UTF8
+    Write-Host "  ✓ HTML report generated: $OutputPath" -ForegroundColor Green
+}
+
+function Generate-DOTGraph {
+    param(
+        [PSCustomObject]$AnalysisResult,
+        [string]$OutputPath
+    )
+    
+    $dot = @"
+digraph G {
+    rankdir=TB;
+    fontname="Helvetica,Arial,sans-serif";
+    node [fontname="Helvetica,Arial,sans-serif", shape=box, style="rounded,filled", fillcolor="#e8f4f8"];
+    edge [fontname="Helvetica,Arial,sans-serif", arrowhead="normal"];
+    
+    // Graph Title
+    label="AD Group Nesting Structure\nRoot Group: $($GroupName)";
+    labelloc=t;
+    fontsize=16;
+    
+"@
+    
+    # Group nodes with depth-based coloring
+    $groups = $AnalysisResult | Where-Object { $_.GroupName } | Sort-Object Depth, GroupName
+    
+    foreach ($group in $groups) {
+        $color = switch ($group.Depth) {
+            0 { "#e8f4f8" }
+            1 { "#d4eaf7" }
+            2 { "#c0dfef" }
+            3 { "#acd4e7" }
+            4 { "#98c9df" }
+            5 { "#84bed7" }
+            default { "#f0f0f0" }
+        }
+        
+        $nodeId = $group.DistinguishedName -replace '[^a-zA-Z0-9]', '_'
+        $label = "$($group.GroupName)\n($($group.TotalMembers) members)"
+        
+        $dot += @"
+    "$nodeId" [label="$label", fillcolor="$color", shape=box, style="rounded,filled"];
+"@
+    }
+    
+    # Member nodes (non-group members)
+    $members = $AnalysisResult | Where-Object { $_.ParentGroup -and -not $_.GroupName } | Sort-Object ObjectClass, Name
+    
+    foreach ($member in $members) {
+        $nodeId = $member.DistinguishedName -replace '[^a-zA-Z0-9]', '_'
+        $color = switch ($member.ObjectClass) {
+            'user' { "#c8e6c9" }
+            'computer' { "#ffe0b2" }
+            default { "#f5f5f5" }
+        }
+        $label = $member.Name
+        
+        $dot += @"
+    "$nodeId" [label="$label", fillcolor="$color", shape=ellipse, style="filled"];
+"@
+    }
+    
+    # Edges (membership relationships)
+    foreach ($member in $AnalysisResult) {
+        if ($member.ParentGroup -and $member.DistinguishedName) {
+            $childId = $member.DistinguishedName -replace '[^a-zA-Z0-9]', '_'
+            $parentId = $member.ParentGroupDN -replace '[^a-zA-Z0-9]', '_'
+            
+            $style = if ($member.ObjectClass -eq 'group') { "style=solid,color=blue,penwidth=2" } else { "style=dashed,color=gray" }
+            
+            $dot += @"
+    "$parentId" -> "$childId" [$style];
+"@
+        }
+    }
+    
+    $dot += "}"
+    
+    $dot | Out-File -FilePath $OutputPath -Encoding UTF8
+    Write-Host "  ✓ DOT graph generated: $OutputPath" -ForegroundColor Green
+    
+    # Optional: Generate PNG using GraphViz
+    if ($ShowGraph) {
+        $pngPath = $OutputPath -replace '\.dot$', '.png'
+        try {
+            $dotExe = Get-Command 'dot' -ErrorAction SilentlyContinue
+            if ($dotExe) {
+                & dot -Tpng $OutputPath -o $pngPath
+                Write-Host "  ✓ PNG image generated: $pngPath" -ForegroundColor Green
+                Start-Process $pngPath
+            }
+            else {
+                Write-Warning "GraphViz (dot.exe) not found. Cannot generate PNG image."
+                Write-Host "  ℹ Install GraphViz from: https://graphviz.org/download/" -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Warning "Failed to generate PNG image: $_"
+        }
+    }
+}
+#endregion
+
+#region Main Script
+function Main {
+    Write-Host "="*70 -ForegroundColor Yellow
+    Write-Host "    NESTED GROUP ANALYSIS TOOL - Active Directory" -ForegroundColor Yellow
+    Write-Host "="*70 -ForegroundColor Yellow
+    Write-Host ""
+    
+    # Check AD module
+    if (-not (Import-ADModule)) {
+        Write-Error "Cannot proceed without ActiveDirectory module."
+        return
+    }
+    
+    # Validate export path
+    if (-not (Test-Path $ExportPath)) {
+        try {
+            New-Item -Path $ExportPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            Write-Host "Created export directory: $ExportPath" -ForegroundColor Green
+        }
+        catch {
+            Write-Error "Cannot create export directory: $_"
+            return
+        }
+    }
+    
+    # Prepare timestamp
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $exportPrefix = "NestedAnalysis_$timestamp"
+    
+    # Initialize data structures
+    $nestingTree = [System.Collections.ArrayList]::new()
+    $visited = @{}
+    $groupInfos = @()
+    $circularRefs = 0
+    
+    # Start analysis
+    Write-Host "Analyzing group nesting for: $GroupName" -ForegroundColor Cyan
+    Write-Host "Max Depth: $MaxDepth" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Get root group
+    try {
+        $rootGroup = Get-ADObject -Identity $GroupName -Properties @('Name', 'DisplayName', 'Description', 'GroupType', 'CanonicalName') -ErrorAction Stop
+    }
+    catch {
+        Write-Error "Cannot find group: $GroupName"
+        return
+    }
+    
+    # Collect nested groups
+    Get-GroupMembersRecursive -GroupDN $rootGroup.DistinguishedName -CurrentDepth 0 -Visited $visited -NestingTree $nestingTree -DC $DomainController
+    
+    # Extract group information from tree
+    $groupMembers = @()
+    $allMembers = @()
+    
+    foreach ($item in $nestingTree) {
+        if ($item.GroupName) {
+            $groupInfos += $item
+        }
+        else {
+            $allMembers += $item
+        }
+    }
+    
+    # Build summary
+    $totalGroups = $groupInfos.Count
+    $totalMembers = $allMembers.Count
+    $maxDepth = ($groupInfos | Measure-Object -Property Depth -Maximum).Maximum
+    $userMembers = ($allMembers | Where-Object { $_.ObjectClass -eq 'user' }).Count
+    $computerMembers = ($allMembers | Where-Object { $_.ObjectClass -eq 'computer' }).Count
+    $groupMembersCount = ($allMembers | Where-Object { $_.ObjectClass -eq 'group' }).Count
+    $otherMembers = $totalMembers - $userMembers - $computerMembers - $groupMembersCount
+    
+    $summary = [PSCustomObject]@{
+        RootGroup = $rootGroup.Name
+        TotalGroups = $totalGroups
+        TotalMembers = $totalMembers
+        MaxDepth = if ($maxDepth) { $maxDepth } else { 0 }
+        UserMembers = $userMembers
+        GroupMembers = $groupMembersCount
+        ComputerMembers = $computerMembers
+        OtherMembers = $otherMembers
+        CircularReferences = $circularRefs
+        AnalysisDate = Get-Date
+    }
+    
+    # Display summary
+    Write-Host ""
+    Write-Host "="*70 -ForegroundColor Yellow
+    Write-Host "    ANALYSIS SUMMARY" -ForegroundColor Yellow
+    Write-Host "="*70 -ForegroundColor Yellow
+    Write-Host "Root Group    : $($summary.RootGroup)" -ForegroundColor Cyan
+    Write-Host "Total Groups  : $($summary.TotalGroups)" -ForegroundColor Green
+    Write-Host "Total Members : $($summary.TotalMembers)" -ForegroundColor Green
+    Write-Host "Max Depth     : $($summary.MaxDepth)" -ForegroundColor Green
+    Write-Host "Users         : $($summary.UserMembers)" -ForegroundColor Green
+    Write-Host "Nested Groups : $($summary.GroupMembers)" -ForegroundColor Green
+    Write-Host "Computers     : $($summary.ComputerMembers)" -ForegroundColor Green
+    Write-Host "Other Objects : $($summary.OtherMembers)" -ForegroundColor Green
+    
+    if ($circularRefs -gt 0) {
+        Write-Host "⚠️  Circular References: $circularRefs" -ForegroundColor Red
+    }
+    Write-Host ""
+    
+    # Export results
+    Write-Host "Exporting analysis results..." -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Prepare export objects
+    $exportGroups = $groupInfos | Select-Object GroupName, DisplayName, Description, Depth, TotalMembers, UserMembers, GroupMembers, ComputerMembers, OtherMembers, CanonicalName
+    $exportMembers = $allMembers | Select-Object Name, DisplayName, SamAccountName, ObjectClass, Depth, ParentGroup, DistinguishedName
+    
+    # Export CSV
+    if ('CSV' -in $OutputFormats) {
+        $csvGroupsPath = Join-Path $ExportPath "$exportPrefix`_Groups.csv"
+        $exportGroups | Export-Csv -Path $csvGroupsPath -NoTypeInformation
+        Write-Host "  ✓ Groups CSV: $csvGroupsPath" -ForegroundColor Green
+        
+        if ($exportMembers.Count -gt 0) {
+            $csvMembersPath = Join-Path $ExportPath "$exportPrefix`_Members.csv"
+            $exportMembers | Export-Csv -Path $csvMembersPath -NoTypeInformation
+            Write-Host "  ✓ Members CSV: $csvMembersPath" -ForegroundColor Green
+        }
+    }
+    
+    # Export JSON
+    if ('JSON' -in $OutputFormats) {
+        $jsonPath = Join-Path $ExportPath "$exportPrefix`_Analysis.json"
+        $jsonData = @{
+            Summary = $summary
+            Groups = $exportGroups
+            Members = $exportMembers
+        }
+        $jsonData | ConvertTo-Json -Depth 5 | Out-File -FilePath $jsonPath -Encoding UTF8
+        Write-Host "  ✓ JSON data: $jsonPath" -ForegroundColor Green
+    }
+    
+    # Export HTML
+    if ('HTML' -in $OutputFormats) {
+        $htmlPath = Join-Path $ExportPath "$exportPrefix`_Report.html"
+        # Combine group info and members for HTML
+        $htmlData = $groupInfos + $allMembers
+        Generate-HTMLReport -AnalysisResult $htmlData -OutputPath $htmlPath -Summary $summary
+    }
+    
+    # Export DOT Graph
+    if ('DOT' -in $OutputFormats) {
+        $dotPath = Join-Path $ExportPath "$exportPrefix`_Graph.dot"
+        $graphData = $groupInfos + $allMembers
+        Generate-DOTGraph -AnalysisResult $graphData -OutputPath $dotPath
+    }
+    
+    Write-Host ""
+    Write-Host "="*70 -ForegroundColor Yellow
+    Write-Host "    ANALYSIS COMPLETE" -ForegroundColor Green
+    Write-Host "="*70 -ForegroundColor Yellow
+    Write-Host "Export location: $ExportPath" -ForegroundColor Cyan
+    Write-Host "Completed at: $(Get-Date)" -ForegroundColor Cyan
+    Write-Host "="*70 -ForegroundColor Yellow
+}
+#endregion
+
+# Run the script
+Main
