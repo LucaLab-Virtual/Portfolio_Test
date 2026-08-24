@@ -42,6 +42,7 @@ Browse the repository by technical area.
 | Area | Description |
 |---|---|
 | [🗂️ Active Directory](./ActiveDirectory/) | User, group, OU, GPO, hybrid identity, provisioning and reporting tools |
+| [🗂️ Active Directory](https://github.com/LucaLab-Virtual/Portfolio_Test/tree/main/ActiveDirectory) | User, group, OU, GPO, hybrid identity, provisioning and reporting tools |
 | [⚙️ Automation](./Automation/) | Automation projects, RMM tooling and operational workflows |
 | [📚 Docs](./Docs/) | Troubleshooting and command reference guides |
 | [☁️ Microsoft 365](./Microsoft365/) | Exchange Online, OneDrive and SharePoint administration |
